@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "proxy",
   "license": "MIT",
-  "description": "Battery level of a Logitech wireless mouse (HID++)",
+  "description": "Battery percentage of a wireless mouse (HID++ or kernel-reported)",
   "kinds": [
     "bar-widget"
   ],
@@ -14,9 +14,21 @@
   },
   "barWidget": {
     "displayName": "Mouse battery",
-    "description": "Battery level of a Logitech wireless mouse, read from the kernel's hid-logitech-hidpp power supply.",
+    "description": "Battery percentage of a wireless mouse, asked of the device over HID++ when the kernel won't publish it.",
     "category": "System",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "defaults": {
+      "device": ""
+    },
+    "schema": [
+      {
+        "key": "device",
+        "type": "string",
+        "label": "Device name filter",
+        "defaultValue": "",
+        "description": "Case-insensitive substring, for when more than one mouse is connected. Empty picks the best candidate."
+      }
+    ]
   }
 }

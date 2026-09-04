@@ -1,115 +1,222 @@
 #!/usr/bin/python3
-"""Read a Logitech mouse's battery percentage over HID++.
+"""Read a wireless mouse's battery, preferring a real percentage.
 
-The kernel's hid-logitech-hidpp already talks to this mouse, but it publishes
-only capacity_level (Full/Low/...) because the G603 doesn't set the "mileage"
-capability flag that would make the driver expose a number. The percentage is
-still there: feature 0x1000 GetBatteryLevelStatus returns a discharge level,
-and that is the number G HUB and solaar both show. So ask for it directly.
+Two sources, in order of what they can tell us:
 
-Prints one tab-separated line: model, percent (may be empty), level (may be
-empty). Prints nothing when there is no Logitech HID++ device at all.
+1. HID++ (Logitech wireless devices). The kernel's hid-logitech-hidpp reads a
+   numeric charge from the device but only publishes it as a `capacity` file
+   when the device advertises a capability flag many mice don't set — so the
+   number is there but sysfs won't show it. Ask the device directly instead,
+   trying each of the three battery features Logitech has shipped.
+2. sysfs `capacity`, for anything else that already reports a real percentage
+   (Bluetooth mice via the HID battery service, other vendors' drivers).
+
+`capacity_level` is the fallback when neither yields a number: a coarse
+Full/High/Normal/Low/Critical with no percentage behind it.
+
+Prints one tab-separated line — model, percent (may be empty), level (may be
+empty) — for the best candidate found, or nothing when there is none. An
+optional argument filters devices by a case-insensitive substring of the name,
+for when more than one mouse is connected.
 """
 
 import glob
 import os
 import select
 import sys
+import time
 
 SW_ID = 0x02          # HID++ software id, so we recognize our own replies
 ROOT_INDEX = 0x00     # the ROOT feature is always at index 0
-BATTERY_FEATURE = 0x1000
 
-# An idle mouse swallows the first request or two — those wake the radio link
-# rather than answer it — so a single timeout means nothing. Retry briefly.
+UNIFIED_BATTERY = 0x1004    # newer devices; carries a state-of-charge byte
+BATTERY_STATUS = 0x1000     # older devices; carries a discharge level
+BATTERY_VOLTAGE = 0x1001    # rechargeables; millivolts, needs a curve
+
+# An idle mouse ignores requests until the radio link wakes, and that applies
+# to the battery read itself, not just the first lookup — a lone timeout means
+# nothing. Only the feature lookups of an already-woken device get the short
+# count, since by then a silent device is a device that hasn't got the feature.
 ATTEMPT_TIMEOUT = 0.5
-ATTEMPTS = 5
+WAKE_ATTEMPTS = 5
+AWAKE_ATTEMPTS = 2
+
+# Li-ion discharge curve, lifted from solaar's hidpp20.py. Only meaningful for
+# the rechargeable devices that expose BATTERY_VOLTAGE in the first place.
+VOLTAGE_CURVE = [
+    (4186, 100), (4067, 90), (3989, 80), (3922, 70), (3859, 60),
+    (3811, 50), (3778, 40), (3751, 30), (3717, 20), (3671, 10),
+    (3610, 5), (3579, 2), (3500, 0),
+]
+
+# UNIFIED_BATTERY reports its coarse level as a bitmask.
+UNIFIED_LEVELS = {8: "Full", 4: "High", 2: "Low", 1: "Critical"}
 
 
-def hidpp_request(fd, dev_index, feat_index, func, params=b""):
+def hidpp_request(fd, dev_index, feat_index, func, params=b"", attempts=AWAKE_ATTEMPTS):
     """Send a short HID++ request, returning the matching reply or None."""
-    packet = bytes([dev_index, feat_index, (func << 4) | SW_ID])
-    packet = bytes([0x10]) + packet + params.ljust(3, b"\x00")
+    tag = (func << 4) | SW_ID
+    packet = bytes([0x10, dev_index, feat_index, tag]) + params.ljust(3, b"\x00")
 
-    for _ in range(ATTEMPTS):
+    for _ in range(attempts):
         os.write(fd, packet)
-        ready, _, _ = select.select([fd], [], [], ATTEMPT_TIMEOUT)
-        if not ready:
-            continue
-        reply = os.read(fd, 64)
-        # Anything else here is other traffic, or an error reply carrying
-        # feature index 0xFF (HID++ 2.0) or 0x8F (HID++ 1.0).
-        if len(reply) >= 7 and reply[1] == dev_index and reply[2] == feat_index \
-                and reply[3] == ((func << 4) | SW_ID):
-            return reply
+        # This node also carries the kernel driver's own requests and the
+        # device's notifications. Those are not ours — the software id in the
+        # tag byte is what tells them apart — so keep draining until this
+        # attempt's window is out rather than retrying on the first stranger.
+        deadline = time.monotonic() + ATTEMPT_TIMEOUT
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:
+                break
+            reply = os.read(fd, 64)
+            # An error reply carries feature index 0xFF (HID++ 2.0) or 0x8F
+            # (HID++ 1.0), so it won't match and the request simply times out.
+            if len(reply) >= 7 and reply[1] == dev_index \
+                    and reply[2] == feat_index and reply[3] == tag:
+                return reply
     return None
 
 
-def find_device():
-    """The first Logitech HID++ node, with the device index to address it by.
-
-    hid-logitech-dj builds each paired device's phys as "<receiver>:<index>",
-    so the pairing slot comes straight out of sysfs instead of being guessed.
-    """
-    for node in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
-        try:
-            with open(os.path.join(node, "device/uevent")) as f:
-                fields = dict(
-                    line.split("=", 1) for line in f.read().splitlines() if "=" in line
-                )
-        except OSError:
-            continue
-        if fields.get("DRIVER") != "logitech-hidpp-device":
-            continue
-        tail = fields.get("HID_PHYS", "").rsplit(":", 1)[-1]
-        return (
-            "/dev/" + os.path.basename(node),
-            int(tail) if tail.isdigit() else 0xFF,
-            fields.get("HID_NAME", "Logitech mouse"),
-        )
-    return None
+def feature_index(fd, dev_index, feature, attempts):
+    """Where this device keeps `feature`, or None if it doesn't have it."""
+    reply = hidpp_request(
+        fd, dev_index, ROOT_INDEX, 0,
+        bytes([feature >> 8, feature & 0xFF]), attempts,
+    )
+    if reply is None:
+        return None      # device unreachable — asleep, off, out of range
+    return reply[4] or 0  # index 0 means "no such feature here"
 
 
-def read_percent(path, dev_index):
+def voltage_percent(millivolts):
+    for threshold, percent in VOLTAGE_CURVE:
+        if millivolts >= threshold:
+            return percent
+    return 0
+
+
+def read_hidpp(path, dev_index):
+    """(percent, level) from the device itself, or None if it never answered."""
     try:
         fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
     except OSError:
         return None  # no udev ACL for us, or the device just went away
     try:
-        feature = hidpp_request(
-            fd, dev_index, ROOT_INDEX, 0,
-            bytes([BATTERY_FEATURE >> 8, BATTERY_FEATURE & 0xFF]),
-        )
-        # A zero index means the device doesn't carry the feature at all.
-        if not feature or not feature[4]:
-            return None
-        status = hidpp_request(fd, dev_index, feature[4], 0)
-        return status[4] if status else None
+        # The first lookup carries the wake-up retries for the whole exchange.
+        attempts = WAKE_ATTEMPTS
+        for feature in (UNIFIED_BATTERY, BATTERY_STATUS, BATTERY_VOLTAGE):
+            index = feature_index(fd, dev_index, feature, attempts)
+            if index is None:
+                return None
+            attempts = AWAKE_ATTEMPTS
+            if not index:
+                continue
+
+            if feature is UNIFIED_BATTERY:
+                reply = hidpp_request(fd, dev_index, index, 1, attempts=WAKE_ATTEMPTS)
+                if reply:
+                    # A zero state-of-charge means this device only fills in
+                    # the coarse level beside it.
+                    return (reply[4] or None, UNIFIED_LEVELS.get(reply[5], ""))
+            elif feature is BATTERY_STATUS:
+                reply = hidpp_request(fd, dev_index, index, 0, attempts=WAKE_ATTEMPTS)
+                if reply:
+                    return (reply[4], "")
+            else:
+                reply = hidpp_request(fd, dev_index, index, 0, attempts=WAKE_ATTEMPTS)
+                if reply:
+                    return (voltage_percent((reply[4] << 8) | reply[5]), "")
+        return (None, "")
     finally:
         os.close(fd)
 
 
-def read_level():
-    """The coarse level the kernel does publish — the fallback."""
-    for supply in sorted(glob.glob("/sys/class/power_supply/hidpp_battery_*")):
-        try:
-            with open(os.path.join(supply, "capacity_level")) as f:
-                return f.read().strip()
-        except OSError:
-            continue
+def read_attr(directory, name):
+    try:
+        with open(os.path.join(directory, name)) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def is_mouse(device_dir):
+    """The kernel builds a mouseN node for anything it treats as a mouse."""
+    return bool(glob.glob(os.path.join(device_dir, "input/*/mouse*")))
+
+
+def level_beside(device_dir):
+    """The coarse level this device's own power supply publishes, if any."""
+    for supply in sorted(glob.glob(os.path.join(device_dir, "power_supply/*"))):
+        level = read_attr(supply, "capacity_level")
+        if level:
+            return level
     return ""
 
 
+def hidpp_candidates():
+    """Every Logitech HID++ node, with the pairing index to address it by.
+
+    hid-logitech-dj builds each paired device's phys as "<receiver>:<index>",
+    so the slot comes straight out of sysfs instead of being guessed.
+    """
+    for node in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        device_dir = os.path.join(node, "device")
+        uevent = read_attr(device_dir, "uevent")
+        fields = dict(l.split("=", 1) for l in uevent.splitlines() if "=" in l)
+        if fields.get("DRIVER") != "logitech-hidpp-device":
+            continue
+
+        tail = fields.get("HID_PHYS", "").rsplit(":", 1)[-1]
+        reading = read_hidpp(
+            "/dev/" + os.path.basename(node),
+            int(tail) if tail.isdigit() else 0xFF,
+        )
+        percent, level = reading if reading else (None, "")
+        yield {
+            "name": fields.get("HID_NAME", "Logitech device"),
+            "percent": percent,
+            "level": level or level_beside(device_dir),
+            "mouse": is_mouse(device_dir),
+        }
+
+
+def sysfs_candidates():
+    """Batteries the kernel already publishes for a peripheral."""
+    for supply in sorted(glob.glob("/sys/class/power_supply/*")):
+        if read_attr(supply, "scope") != "Device":
+            continue
+        capacity = read_attr(supply, "capacity")
+        yield {
+            "name": read_attr(supply, "model_name") or os.path.basename(supply),
+            "percent": int(capacity) if capacity.isdigit() else None,
+            "level": read_attr(supply, "capacity_level"),
+            "mouse": is_mouse(os.path.join(supply, "device")),
+        }
+
+
 def main():
-    found = find_device()
+    wanted = sys.argv[1].lower() if len(sys.argv) > 1 else ""
+
+    found = [c for c in list(hidpp_candidates()) + list(sysfs_candidates())
+             if c["percent"] is not None or c["level"]]
+    if wanted:
+        found = [c for c in found if wanted in c["name"].lower()]
     if not found:
         return
-    path, dev_index, name = found
-    percent = read_percent(path, dev_index)
-    level = read_level()
-    if percent is None and not level:
-        return
-    sys.stdout.write("%s\t%s\t%s" % (name, "" if percent is None else percent, level))
+
+    # A mouse beats a keyboard, and a real percentage beats a coarse level —
+    # which is also what makes the HID++ reading win over the same device's
+    # sysfs entry, and what lets that entry stand in when the mouse is asleep.
+    best = max(found, key=lambda c: (c["mouse"], c["percent"] is not None))
+    sys.stdout.write("%s\t%s\t%s" % (
+        best["name"],
+        "" if best["percent"] is None else best["percent"],
+        best["level"],
+    ))
 
 
 main()

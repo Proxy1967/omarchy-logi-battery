@@ -1,7 +1,7 @@
 # omarchy-logi-battery
 
-An [Omarchy](https://omarchy.org/) shell bar widget showing a Logitech wireless
-mouse's battery percentage.
+An [Omarchy](https://omarchy.org/) shell bar widget showing a wireless mouse's
+battery percentage.
 
 ```
 󰍽 90%
@@ -9,8 +9,9 @@ mouse's battery percentage.
 
 ## Why this exists
 
-The kernel's `hid-logitech-hidpp` driver already talks to these mice, but for
-some of them — the Logitech G603 among them — it publishes only a coarse level:
+The kernel's `hid-logitech-hidpp` driver already talks to Logitech wireless
+mice, but for many of them — the Logitech G603 among them — it publishes only a
+coarse level:
 
 ```
 $ cat /sys/class/power_supply/hidpp_battery_0/capacity_level
@@ -19,31 +20,48 @@ $ upower -i .../battery_hidpp_battery_0
   percentage:          100% (should be ignored)
 ```
 
-The percentage does exist. The driver reads a numeric discharge level from
-HID++ feature `0x1000`, but only exposes it as a `capacity` file when the device
-advertises the "mileage" capability flag — which these devices don't, even
-though they answer the query perfectly well. Logitech's own G HUB shows the
-number; it just asks directly.
+The percentage does exist. The driver reads a numeric charge from the device
+but only exposes it as a `capacity` file when the device advertises a
+"mileage" capability flag — which these mice don't set, even though they answer
+the query perfectly well. Logitech's own G HUB shows the number; it just asks
+directly.
 
-So `logi-battery` asks directly too: two short HID++ requests over the mouse's
-`hidraw` node, about 0.15s, Python standard library only.
+So `logi-battery` asks directly too, in Python with nothing but the standard
+library.
 
-Note the reading is a **stepped gauge, not a smooth readout** — a G603 reports
-90% with "next level 50%".
+## What it reads
+
+| Source | Gives | Covers |
+|---|---|---|
+| HID++ `0x1004` UNIFIED BATTERY | state-of-charge %, else a coarse level | newer Logitech devices |
+| HID++ `0x1000` BATTERY STATUS | discharge level % | older Logitech devices (G603 and friends) |
+| HID++ `0x1001` BATTERY VOLTAGE | mV, converted with a Li-ion curve | Logitech rechargeables |
+| sysfs `capacity` | % | anything else the kernel already reports properly, e.g. Bluetooth mice using the HID battery service |
+| sysfs `capacity_level` | Full/High/Normal/Low/Critical | the fallback when no number is available |
+
+It prefers a mouse over other peripherals, and a real percentage over a coarse
+level — which is also what makes a live HID++ reading win over the same
+device's sysfs entry, and what lets that entry stand in while the mouse sleeps.
+
+**Not covered:** mice whose battery is reported only over Bluetooth's GATT
+battery service through BlueZ, with no kernel power supply behind it. Those
+need UPower/D-Bus rather than the two paths above.
 
 ## Requirements
 
 - Omarchy 4.x (the Quickshell-based `omarchy-shell`)
-- **`solaar`** — installed for its udev rule
+- For **Logitech HID++ devices**: `solaar`, installed for its udev rule
   (`42-logitech-unify-permissions.rules`, which tags Logitech hidraw nodes
-  `uaccess`). Without that rule the node is root-only and this widget cannot
-  read it. Solaar itself is not used at runtime; it is also the easiest way to
-  confirm your device reports a percentage at all:
+  `uaccess`). Without that rule the node is root-only and the HID++ path cannot
+  read it. Solaar is not used at runtime; it is also the easiest way to check
+  what your device reports:
 
   ```bash
   omarchy pkg add solaar
-  solaar show | grep -A1 'BATTERY STATUS'
+  solaar show | grep -i battery
   ```
+
+  The sysfs paths need no permissions and no extra packages.
 
 ## Install
 
@@ -65,28 +83,36 @@ Note that editing a bar widget's QML does **not** hot-reload the running
 instance, despite the `Local plugin changed, reloading` log line. Use
 `omarchy restart shell` after changes.
 
+## Settings
+
+| Key | Default | What it does |
+|---|---|---|
+| `device` | `""` | Case-insensitive substring of the device name, for when more than one mouse is connected. Empty lets the widget pick. |
+
+```bash
+omarchy bar set proxy.logi-battery device "MX Master"
+```
+
 ## Behavior
 
 | State | Shown |
 |---|---|
 | Percentage available | mouse glyph + `NN%` |
-| HID++ unreachable, kernel level readable | mouse glyph + a battery glyph for `Full`/`High`/`Normal`/`Low`/`Critical` |
-| No Logitech HID++ device | widget hides itself |
+| Only a coarse level readable | mouse glyph + a battery glyph for `Full`/`High`/`Normal`/`Low`/`Critical` |
+| No mouse battery at all | widget hides itself |
 
-At or below 20% the widget switches to the theme's `urgent` color. The tooltip
-carries the device name and reading. On a vertical bar the mouse glyph is
-dropped and the bare number shown.
-
-Polled every 5 minutes: the value moves in coarse steps over weeks, and each
-poll briefly wakes the mouse's radio.
+At or below 20% it switches to the theme's `urgent` color. The tooltip carries
+the device name and reading. On a vertical bar the mouse glyph is dropped and
+the bare number shown. Polled every 5 minutes: the value moves in coarse steps,
+and each poll briefly wakes the mouse's radio.
 
 ## Limitations
 
-- Takes the **first** `logitech-hidpp-device` node it finds. A second HID++
-  device (keyboard, headset) would need a way to say which one is meant.
-- An idle mouse ignores the first request or two — those wake the radio link
-  rather than answer it. The reader retries up to 5 times at 0.5s; a device
-  that is off simply falls back to the kernel level.
+- **The number is a coarse ladder, not a gauge.** A G603 steps 100 → 90 → 50,
+  and the reading bounces between the top steps as cell voltage recovers while
+  the mouse rests. Don't read a trend into small changes.
+- An idle mouse ignores requests until its radio link wakes, so the reader
+  retries; a device that is off falls back to the kernel's level.
 - The 20% urgent threshold is a guess. The step ladder below 50% is unknown
   until a set of batteries actually drains.
 

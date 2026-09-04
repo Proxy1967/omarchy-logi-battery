@@ -7,10 +7,10 @@ BarWidget {
   id: root
   moduleName: "proxy.logi-battery"
 
-  // `logi-battery` asks the mouse for its discharge level over HID++, which is
-  // the percentage G HUB shows. The kernel knows that number too but doesn't
-  // publish it, so sysfs only ever offers the coarse level — kept here as the
-  // fallback for when the mouse is asleep or the hidraw ACL is missing.
+  // `logi-battery` asks the mouse itself for a percentage over HID++, which the
+  // kernel reads but won't publish for devices that don't set a capability
+  // flag. It falls back to the coarse level sysfs does publish, for when the
+  // mouse is asleep or the hidraw ACL is missing.
   property string deviceName: ""
   property int percent: -1
   property string level: ""
@@ -37,7 +37,9 @@ BarWidget {
 
   Process {
     id: readProc
-    command: [root.reader]
+    // An empty filter lets the reader pick; a substring names one of several.
+    command: root.setting("device", "") === "" ? [root.reader]
+                                               : [root.reader, root.setting("device", "")]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
