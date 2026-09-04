@@ -1,0 +1,115 @@
+#!/usr/bin/python3
+"""Read a Logitech mouse's battery percentage over HID++.
+
+The kernel's hid-logitech-hidpp already talks to this mouse, but it publishes
+only capacity_level (Full/Low/...) because the G603 doesn't set the "mileage"
+capability flag that would make the driver expose a number. The percentage is
+still there: feature 0x1000 GetBatteryLevelStatus returns a discharge level,
+and that is the number G HUB and solaar both show. So ask for it directly.
+
+Prints one tab-separated line: model, percent (may be empty), level (may be
+empty). Prints nothing when there is no Logitech HID++ device at all.
+"""
+
+import glob
+import os
+import select
+import sys
+
+SW_ID = 0x02          # HID++ software id, so we recognize our own replies
+ROOT_INDEX = 0x00     # the ROOT feature is always at index 0
+BATTERY_FEATURE = 0x1000
+
+# An idle mouse swallows the first request or two — those wake the radio link
+# rather than answer it — so a single timeout means nothing. Retry briefly.
+ATTEMPT_TIMEOUT = 0.5
+ATTEMPTS = 5
+
+
+def hidpp_request(fd, dev_index, feat_index, func, params=b""):
+    """Send a short HID++ request, returning the matching reply or None."""
+    packet = bytes([dev_index, feat_index, (func << 4) | SW_ID])
+    packet = bytes([0x10]) + packet + params.ljust(3, b"\x00")
+
+    for _ in range(ATTEMPTS):
+        os.write(fd, packet)
+        ready, _, _ = select.select([fd], [], [], ATTEMPT_TIMEOUT)
+        if not ready:
+            continue
+        reply = os.read(fd, 64)
+        # Anything else here is other traffic, or an error reply carrying
+        # feature index 0xFF (HID++ 2.0) or 0x8F (HID++ 1.0).
+        if len(reply) >= 7 and reply[1] == dev_index and reply[2] == feat_index \
+                and reply[3] == ((func << 4) | SW_ID):
+            return reply
+    return None
+
+
+def find_device():
+    """The first Logitech HID++ node, with the device index to address it by.
+
+    hid-logitech-dj builds each paired device's phys as "<receiver>:<index>",
+    so the pairing slot comes straight out of sysfs instead of being guessed.
+    """
+    for node in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        try:
+            with open(os.path.join(node, "device/uevent")) as f:
+                fields = dict(
+                    line.split("=", 1) for line in f.read().splitlines() if "=" in line
+                )
+        except OSError:
+            continue
+        if fields.get("DRIVER") != "logitech-hidpp-device":
+            continue
+        tail = fields.get("HID_PHYS", "").rsplit(":", 1)[-1]
+        return (
+            "/dev/" + os.path.basename(node),
+            int(tail) if tail.isdigit() else 0xFF,
+            fields.get("HID_NAME", "Logitech mouse"),
+        )
+    return None
+
+
+def read_percent(path, dev_index):
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+    except OSError:
+        return None  # no udev ACL for us, or the device just went away
+    try:
+        feature = hidpp_request(
+            fd, dev_index, ROOT_INDEX, 0,
+            bytes([BATTERY_FEATURE >> 8, BATTERY_FEATURE & 0xFF]),
+        )
+        # A zero index means the device doesn't carry the feature at all.
+        if not feature or not feature[4]:
+            return None
+        status = hidpp_request(fd, dev_index, feature[4], 0)
+        return status[4] if status else None
+    finally:
+        os.close(fd)
+
+
+def read_level():
+    """The coarse level the kernel does publish — the fallback."""
+    for supply in sorted(glob.glob("/sys/class/power_supply/hidpp_battery_*")):
+        try:
+            with open(os.path.join(supply, "capacity_level")) as f:
+                return f.read().strip()
+        except OSError:
+            continue
+    return ""
+
+
+def main():
+    found = find_device()
+    if not found:
+        return
+    path, dev_index, name = found
+    percent = read_percent(path, dev_index)
+    level = read_level()
+    if percent is None and not level:
+        return
+    sys.stdout.write("%s\t%s\t%s" % (name, "" if percent is None else percent, level))
+
+
+main()

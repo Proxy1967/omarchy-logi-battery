@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "proxy.logi-battery",
+  "name": "Mouse battery",
+  "version": "1.0.0",
+  "author": "proxy",
+  "license": "MIT",
+  "description": "Battery level of a Logitech wireless mouse (HID++)",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Mouse battery",
+    "description": "Battery level of a Logitech wireless mouse, read from the kernel's hid-logitech-hidpp power supply.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
