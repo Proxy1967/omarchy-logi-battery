@@ -85,6 +85,24 @@ Note that editing a bar widget's QML does **not** hot-reload the running
 instance, despite the `Local plugin changed, reloading` log line. Use
 `omarchy restart shell` after changes.
 
+## Uninstall
+
+```bash
+omarchy plugin remove proxy.logi-battery
+```
+
+That disables the widget, unloads it from the running shell and deletes
+`~/.config/omarchy/plugins/proxy.logi-battery/`. The plugin writes nothing
+outside that directory and its own entry in `~/.config/omarchy/shell.json`, so
+there is nothing further to clean up — `solaar`, if you installed it for the
+udev rule, is yours to keep or remove with `omarchy pkg remove solaar`.
+
+To keep the plugin installed but take it off the bar:
+
+```bash
+omarchy plugin disable proxy.logi-battery
+```
+
 ## Settings
 
 | Key | Default | What it does |
