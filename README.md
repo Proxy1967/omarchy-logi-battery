@@ -48,13 +48,14 @@ Note the reading is a **stepped gauge, not a smooth readout** — a G603 reports
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/<you>/omarchy-logi-battery.git --enable
+omarchy plugin add https://github.com/Proxy1967/omarchy-logi-battery.git --enable
 ```
 
 Or by hand:
 
 ```bash
-git clone <url> ~/.config/omarchy/plugins/proxy.logi-battery
+git clone https://github.com/Proxy1967/omarchy-logi-battery.git \
+  ~/.config/omarchy/plugins/proxy.logi-battery
 omarchy-shell shell rescanPlugins
 omarchy plugin enable proxy.logi-battery
 omarchy bar move proxy.logi-battery --section right
