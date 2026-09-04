@@ -39,9 +39,11 @@ library.
 | sysfs `capacity` | % | anything else the kernel already reports properly, e.g. Bluetooth mice using the HID battery service |
 | sysfs `capacity_level` | Full/High/Normal/Low/Critical | the fallback when no number is available |
 
-It prefers a mouse over other peripherals, and a real percentage over a coarse
-level — which is also what makes a live HID++ reading win over the same
-device's sysfs entry, and what lets that entry stand in while the mouse sleeps.
+It considers **only mice** — the widget draws a mouse, so a keyboard's battery
+under that glyph would be a lie, and a device it won't report on is a device it
+won't wake. Among mice it prefers a real percentage over a coarse level, which
+is what makes a live HID++ reading win over the same device's sysfs entry, and
+what lets that entry stand in while the mouse sleeps.
 
 **Not covered:** mice whose battery is reported only over Bluetooth's GATT
 battery service through BlueZ, with no kernel power supply behind it. Those
@@ -115,6 +117,10 @@ and each poll briefly wakes the mouse's radio.
   retries; a device that is off falls back to the kernel's level.
 - The 20% urgent threshold is a guess. The step ladder below 50% is unknown
   until a set of batteries actually drains.
+- A device is recognised as a mouse by the kernel's `mouseN` node. Something
+  that reports a battery without presenting as a pointing device won't show up.
+- HID++ `0x1004` reports 0 for "no state-of-charge here" and for a flat
+  battery alike, so a genuinely empty one falls back to its coarse level.
 
 ## License
 

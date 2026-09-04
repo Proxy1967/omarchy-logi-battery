@@ -22,11 +22,16 @@ for when more than one mouse is connected.
 
 import glob
 import os
+import random
 import select
 import sys
 import time
 
-SW_ID = 0x02          # HID++ software id, so we recognize our own replies
+# HID++ tags every reply with the software id of the request that caused it.
+# Pick one per process: a bar surface exists per monitor, so two copies of this
+# reader run at once, and every open of a hidraw node receives a copy of every
+# reply — including the other copy's. A shared id makes those indistinguishable.
+SW_ID = random.randint(1, 15)
 ROOT_INDEX = 0x00     # the ROOT feature is always at index 0
 
 UNIFIED_BATTERY = 0x1004    # newer devices; carries a state-of-charge byte
@@ -75,7 +80,8 @@ def hidpp_request(fd, dev_index, feat_index, func, params=b"", attempts=AWAKE_AT
             reply = os.read(fd, 64)
             # An error reply carries feature index 0xFF (HID++ 2.0) or 0x8F
             # (HID++ 1.0), so it won't match and the request simply times out.
-            if len(reply) >= 7 and reply[1] == dev_index \
+            if len(reply) >= 7 and reply[0] in (0x10, 0x11) \
+                    and reply[1] == dev_index \
                     and reply[2] == feat_index and reply[3] == tag:
                 return reply
     return None
@@ -135,6 +141,24 @@ def read_hidpp(path, dev_index):
         os.close(fd)
 
 
+def pairing_index(phys):
+    """The receiver slot to address a device by, or 0xFF for a direct link.
+
+    hid-logitech-dj builds a paired device's phys as "<receiver>/input2:1", so
+    the slot follows the last colon of the last path segment. A device on USB
+    or Bluetooth has no slot and answers on 0xFF — and a Bluetooth phys is a
+    bare MAC, whose final octet is all digits often enough (roughly two MACs in
+    five) that reading it as a slot would address nothing.
+    """
+    if "/" not in phys:
+        return 0xFF
+    last = phys.rsplit("/", 1)[-1]
+    if ":" not in last:
+        return 0xFF
+    tail = last.rsplit(":", 1)[-1]
+    return int(tail) if tail.isdigit() else 0xFF
+
+
 def read_attr(directory, name):
     try:
         with open(os.path.join(directory, name)) as f:
@@ -157,12 +181,15 @@ def level_beside(device_dir):
     return ""
 
 
-def hidpp_candidates():
-    """Every Logitech HID++ node, with the pairing index to address it by.
+def wanted_mouse(name, device_dir, wanted):
+    """Skip anything we would not report on — before going near its radio."""
+    if wanted and wanted not in name.lower():
+        return False
+    return is_mouse(device_dir)
 
-    hid-logitech-dj builds each paired device's phys as "<receiver>:<index>",
-    so the slot comes straight out of sysfs instead of being guessed.
-    """
+
+def hidpp_candidates(wanted):
+    """Every Logitech HID++ mouse, read from the device itself."""
     for node in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
         device_dir = os.path.join(node, "device")
         uevent = read_attr(device_dir, "uevent")
@@ -170,48 +197,50 @@ def hidpp_candidates():
         if fields.get("DRIVER") != "logitech-hidpp-device":
             continue
 
-        tail = fields.get("HID_PHYS", "").rsplit(":", 1)[-1]
+        name = fields.get("HID_NAME", "Logitech device")
+        if not wanted_mouse(name, device_dir, wanted):
+            continue
+
         reading = read_hidpp(
             "/dev/" + os.path.basename(node),
-            int(tail) if tail.isdigit() else 0xFF,
+            pairing_index(fields.get("HID_PHYS", "")),
         )
         percent, level = reading if reading else (None, "")
         yield {
-            "name": fields.get("HID_NAME", "Logitech device"),
+            "name": name,
             "percent": percent,
             "level": level or level_beside(device_dir),
-            "mouse": is_mouse(device_dir),
         }
 
 
-def sysfs_candidates():
-    """Batteries the kernel already publishes for a peripheral."""
+def sysfs_candidates(wanted):
+    """Mouse batteries the kernel already publishes."""
     for supply in sorted(glob.glob("/sys/class/power_supply/*")):
         if read_attr(supply, "scope") != "Device":
             continue
+        name = read_attr(supply, "model_name") or os.path.basename(supply)
+        if not wanted_mouse(name, os.path.join(supply, "device"), wanted):
+            continue
         capacity = read_attr(supply, "capacity")
         yield {
-            "name": read_attr(supply, "model_name") or os.path.basename(supply),
+            "name": name,
             "percent": int(capacity) if capacity.isdigit() else None,
             "level": read_attr(supply, "capacity_level"),
-            "mouse": is_mouse(os.path.join(supply, "device")),
         }
 
 
 def main():
     wanted = sys.argv[1].lower() if len(sys.argv) > 1 else ""
 
-    found = [c for c in list(hidpp_candidates()) + list(sysfs_candidates())
+    found = [c for c in list(hidpp_candidates(wanted)) + list(sysfs_candidates(wanted))
              if c["percent"] is not None or c["level"]]
-    if wanted:
-        found = [c for c in found if wanted in c["name"].lower()]
     if not found:
         return
 
-    # A mouse beats a keyboard, and a real percentage beats a coarse level —
-    # which is also what makes the HID++ reading win over the same device's
-    # sysfs entry, and what lets that entry stand in when the mouse is asleep.
-    best = max(found, key=lambda c: (c["mouse"], c["percent"] is not None))
+    # A real percentage beats a coarse level, which is what makes the HID++
+    # reading win over the same device's sysfs entry, and what lets that entry
+    # stand in when the mouse is asleep.
+    best = max(found, key=lambda c: c["percent"] is not None)
     sys.stdout.write("%s\t%s\t%s" % (
         best["name"],
         "" if best["percent"] is None else best["percent"],

@@ -50,8 +50,10 @@ BarWidget {
           root.level = ""
           return
         }
+        // An int property turns NaN into 0, which would read as a real 0%.
+        var reading = parseInt(parts[1])
         root.deviceName = parts[0]
-        root.percent = parts[1] === "" ? -1 : parseInt(parts[1])
+        root.percent = isNaN(reading) ? -1 : reading
         root.level = parts[2]
       }
     }
