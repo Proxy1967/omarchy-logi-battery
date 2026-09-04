@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "proxy.logi-battery",
+  "id": "io.github.proxy1967.logi-battery",
   "name": "Mouse battery",
   "version": "1.0.0",
   "author": "proxy",

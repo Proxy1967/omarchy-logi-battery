@@ -75,10 +75,10 @@ Or by hand:
 
 ```bash
 git clone https://github.com/Proxy1967/omarchy-logi-battery.git \
-  ~/.config/omarchy/plugins/proxy.logi-battery
+  ~/.config/omarchy/plugins/io.github.proxy1967.logi-battery
 omarchy-shell shell rescanPlugins
-omarchy plugin enable proxy.logi-battery
-omarchy bar move proxy.logi-battery --section right
+omarchy plugin enable io.github.proxy1967.logi-battery
+omarchy bar move io.github.proxy1967.logi-battery --section right
 ```
 
 Note that editing a bar widget's QML does **not** hot-reload the running
@@ -88,19 +88,20 @@ instance, despite the `Local plugin changed, reloading` log line. Use
 ## Uninstall
 
 ```bash
-omarchy plugin remove proxy.logi-battery
+omarchy plugin remove io.github.proxy1967.logi-battery
 ```
 
 That disables the widget, unloads it from the running shell and deletes
-`~/.config/omarchy/plugins/proxy.logi-battery/`. The plugin writes nothing
-outside that directory and its own entry in `~/.config/omarchy/shell.json`, so
-there is nothing further to clean up — `solaar`, if you installed it for the
-udev rule, is yours to keep or remove with `omarchy pkg remove solaar`.
+`~/.config/omarchy/plugins/io.github.proxy1967.logi-battery/`. The plugin
+writes nothing outside that directory and its own entry in
+`~/.config/omarchy/shell.json`, so there is nothing further to clean up —
+`solaar`, if you installed it for the udev rule, is yours to keep or remove
+with `omarchy pkg remove solaar`.
 
 To keep the plugin installed but take it off the bar:
 
 ```bash
-omarchy plugin disable proxy.logi-battery
+omarchy plugin disable io.github.proxy1967.logi-battery
 ```
 
 ## Settings
@@ -110,7 +111,7 @@ omarchy plugin disable proxy.logi-battery
 | `device` | `""` | Case-insensitive substring of the device name, for when more than one mouse is connected. Empty lets the widget pick. |
 
 ```bash
-omarchy bar set proxy.logi-battery device "MX Master"
+omarchy bar set io.github.proxy1967.logi-battery device "MX Master"
 ```
 
 ## Behavior

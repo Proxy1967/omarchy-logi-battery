@@ -5,7 +5,7 @@ import qs.Ui
 
 BarWidget {
   id: root
-  moduleName: "proxy.logi-battery"
+  moduleName: "io.github.proxy1967.logi-battery"
 
   // `logi-battery` asks the mouse itself for a percentage over HID++, which the
   // kernel reads but won't publish for devices that don't set a capability
